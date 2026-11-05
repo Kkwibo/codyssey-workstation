@@ -22,6 +22,7 @@
 15. [Git 설정 및 GitHub / VSCode 연동](#log-git)
 16. [개념 정리](#concepts)
 17. [트러블슈팅](#troubleshooting)
+    - [TS-7. 포트 충돌 진단 및 해제](#ts-port)
 18. [보안 및 개인정보 점검](#security)
 19. [재현 시 주의사항](#reproduce)
 
@@ -121,6 +122,7 @@ workstation/
 | 커스텀 이미지 | `docker build -t codyssey-web:1.0 .` | 빌드 성공, ENV/LABEL/HEALTHCHECK 적용 | [로그](#log-dockerfile) |
 | 포트 매핑 | `docker run -p 8080:80`, `-p 8081:80` + `curl` | 두 포트 모두 200 응답, 브라우저 접속 | [로그·스크린샷](#log-port) |
 | 바인드 마운트 | `-v "$(pwd)/bind-site":/usr/share/nginx/html` | 호스트 수정이 재빌드 없이 반영 | [로그·스크린샷](#log-bind) |
+| 포트 충돌 진단 | `ss -ltnp`, `lsof -i`, `kill`, `docker ps --filter "publish=8080"` | 점유 프로세스·컨테이너 확인 → 종료 → 해제 후 재실행 성공 | [로그](#ts-port) |
 | 볼륨 영속성 | `docker volume create`, `rm -f` 후 재연결 | 새 컨테이너에서도 `persist me` 유지 | [로그](#log-volume) |
 | Git / GitHub | `git config --list`, `git remote -v`, `git push` | 사용자 정보·브랜치 설정, 원격 연동 | [로그·스크린샷](#log-git) |
 
@@ -832,6 +834,84 @@ docker: invalid reference format
 - **문제**: VSCode 터미널이 `PS Microsoft.PowerShell.Core\FileSystem::\\wsl.localhost\Ubuntu\...`로 열림
 - **원인**: Windows VSCode가 WSL 파일을 네트워크 경로로 열었을 뿐, WSL에 원격 연결된 상태가 아님 (명령은 Windows에서 실행됨)
 - **해결**: WSL 확장 설치 → 좌측 하단 `><` → WSL 연결 (또는 Ubuntu 터미널에서 `code .`) → 상태바 `WSL: Ubuntu`, 터미널 bash 확인
+
+<a id="ts-port"></a>
+### TS-7. 포트 충돌 진단 및 해제
+
+포트 충돌은 "이미 다른 프로세스가 그 포트를 쓰고 있어서" 새 서비스가 포트를 열지 못하는 상황이다. **① 누가 쓰는지 확인 → ② 그 프로세스를 종료 → ③ 해제 확인 → ④ 재실행** 순서로 해결한다. 실제로 충돌을 재현해서 두 가지 경우를 검증했다.
+
+#### (A) 호스트의 일반 프로세스가 포트를 점유한 경우 — `ss` / `lsof` / `kill`
+
+```bash
+# 9000번 포트를 일부러 점유 (& = 백그라운드 실행)
+$ python3 -m http.server 9000 &
+[1] 19739
+Serving HTTP on 0.0.0.0 port 9000 (http://0.0.0.0:9000/) ...
+
+# ① 포트 사용 프로세스 확인
+$ ss -ltnp | grep 9000
+LISTEN 0      5             0.0.0.0:9000       0.0.0.0:*    users:(("python3",pid=19739,fd=3))
+$ lsof -i :9000
+COMMAND   PID          USER FD   TYPE DEVICE SIZE/OFF NODE NAME
+python3 19739 tiki496864965 3u  IPv4 301509      0t0  TCP *:9000 (LISTEN)
+
+# ② PID로 프로세스 종료
+$ kill 19739
+
+# ③ 해제 확인 (출력 없음 = 포트 비어 있음)
+$ ss -ltnp | grep 9000
+$
+```
+
+| 명령 | 의미 |
+|---|---|
+| `ss -ltnp` | listen 중인(`-l`) TCP(`-t`) 포트를 숫자로(`-n`), 사용 프로세스와 함께(`-p`) 출력 |
+| `lsof -i :<포트>` | 해당 포트를 연 프로세스의 이름·PID·사용자 출력 |
+| `kill <PID>` | 프로세스에 종료 신호(SIGTERM) 전송 |
+| `kill -9 <PID>` | `kill`로 안 죽을 때만 쓰는 강제 종료(SIGKILL). 정리 작업 없이 종료되므로 최후 수단 |
+| `sudo systemctl stop <서비스>` | 포트를 잡은 것이 시스템 서비스(예: 호스트에 설치한 nginx, apache2)일 때. `kill`로 죽여도 서비스 관리자가 다시 띄우므로 서비스 단위로 중지한다. 부팅 시 자동 실행까지 막으려면 `sudo systemctl disable <서비스>` |
+
+#### (B) Docker 컨테이너끼리 같은 호스트 포트를 요청한 경우
+
+```bash
+$ docker run -d -p 8080:80 --name web-8080 codyssey-web:1.0
+74f6d894578f1fdc75d541d72087e7e180819bddd54f163849edcfffa7978820
+
+# 같은 호스트 포트로 하나 더 실행 → 충돌
+$ docker run -d -p 8080:80 --name web-conflict codyssey-web:1.0
+8aeff67886d01588a0ba2d58abb4e938a0de5a18e5df5624e6f6d59c3c41fa0c
+docker: Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint web-conflict (9ce33f5623a1...): Bind for 0.0.0.0:8080 failed: port is already allocated
+
+# ① 8080을 점유한 컨테이너 확인
+$ docker ps --filter "publish=8080"
+CONTAINER ID   IMAGE              COMMAND                  CREATED          STATUS                    PORTS                                     NAMES
+74f6d894578f   codyssey-web:1.0   "/docker-entrypoint.…"   39 seconds ago   Up 38 seconds (healthy)   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web-8080
+$ docker ps -a
+CONTAINER ID   IMAGE              COMMAND                  CREATED          STATUS                    PORTS                                     NAMES
+8aeff67886d0   codyssey-web:1.0   "/docker-entrypoint.…"   23 seconds ago   Created                                                             web-conflict
+74f6d894578f   codyssey-web:1.0   "/docker-entrypoint.…"   46 seconds ago   Up 46 seconds (healthy)   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web-8080
+#  → 실패한 web-conflict는 'Created' 상태로 남아 있음
+
+# ② 점유 컨테이너 중지 → 포트 해제
+$ docker stop web-8080
+web-8080
+
+# ④ 실패한 컨테이너 삭제 후 재실행 → 성공
+$ docker rm web-conflict
+web-conflict
+$ docker run -d -p 8080:80 --name web-conflict codyssey-web:1.0
+2c9340dd2bc63501317259af1d890b5ae599951b61d1a2a884524f25c97645e4
+$ docker ps
+CONTAINER ID   IMAGE              COMMAND                  CREATED         STATUS                            PORTS                                     NAMES
+2c9340dd2bc6   codyssey-web:1.0   "/docker-entrypoint.…"   3 seconds ago   Up 3 seconds (health: starting)   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web-conflict
+
+# 정리
+$ docker rm -f web-8080 web-conflict
+```
+
+- 에러 직전에 컨테이너 ID가 출력된 것처럼, 포트 바인딩에 실패해도 **컨테이너는 `Created` 상태로 생성된다.** 같은 이름으로 다시 실행하려면 먼저 `docker rm`으로 지워야 한다 (안 지우면 [TS-3](#troubleshooting)의 이름 충돌 발생).
+- **Docker Desktop(WSL2) 환경 주의:** 컨테이너의 포트는 Ubuntu가 아니라 Docker Desktop의 별도 VM이 연다. 그래서 Ubuntu의 `ss`/`lsof`에는 보이지 않을 수 있으며, 컨테이너가 쓰는 포트는 `docker ps --filter "publish=<포트>"`로 확인하는 것이 정확하다. Windows 쪽 점유 프로세스는 PowerShell에서 `netstat -ano | findstr :8080`으로 PID를 확인하고 `Stop-Process -Id <PID>`로 종료한다.
+- 기존 서비스를 끌 수 없다면 **호스트 포트만 바꿔서** 실행하는 것도 해결책이다 (`-p 8081:80`). 컨테이너 내부 포트(80)는 그대로 둬도 된다.
 
 ---
 
