@@ -1,0 +1,1 @@
+echo "permission test OK"
