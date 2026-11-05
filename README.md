@@ -691,6 +691,18 @@ Untracked files:
 $ git add .
 $ git commit -m "Add workstation setup docs, Dockerfile and practice files"
 $ git push -u origin main
+To https://github.com/Kkwibo/codyssey-workstation.git
+   ...
+$ mv docs/images/github.png docs/images/vscode_github.png
+$ git add .
+$ git commit -m "Add workstation setup docs, Dockerfile and practicefile"
+[main 3094c1f] Add workstation setup docs, Dockerfile and practicefile
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+ rename docs/images/{github.png => vscode_github.png} (100%)
+$ git push -u origin main
+To https://github.com/Kkwibo/codyssey-workstation.git
+   3965d91..3094c1f  main -> main
+branch 'main' set up to track 'origin/main'.
 ```
 
 ### 15-4. VSCode GitHub 로그인 및 WSL 연동 증거
